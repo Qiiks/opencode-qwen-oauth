@@ -22,7 +22,8 @@
     "test:e2e": "node ./scripts/e2e-smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "version": "changeset version"
   },
   "keywords": [
     "opencode",
@@ -39,7 +40,7 @@
   "bugs": {
     "url": "https://github.com/Qiiks/opencode-qwen-oauth/issues"
   },
-      "homepage": "https://github.com/Qiiks/opencode-qwen-oauth#readme",
+  "homepage": "https://github.com/Qiiks/opencode-qwen-oauth#readme",
   "publishConfig": {
     "access": "public"
   },
@@ -48,6 +49,7 @@
     "typescript": "^5"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.30.0",
     "@opencode-ai/plugin": "^1.2.27",
     "@types/node": "^24.6.0",
     "typescript": "^5.9.3",
