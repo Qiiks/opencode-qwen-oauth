@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -56,21 +56,20 @@ describe("compatibility", () => {
     });
   });
 
-  it("validates workspace compatibility matrix source-of-truth", async () => {
-    const workspaceMatrix = join(process.cwd(), "..", ".omc", "contracts", "compatibility-matrix.json");
-    const matrixRaw = await readFile(workspaceMatrix, "utf8");
-    const matrix = JSON.parse(matrixRaw) as { node: string[] };
+  it("validates bundled compatibility matrix source-of-truth", async () => {
+    const { BUNDLED_COMPATIBILITY_MATRIX } = await import("../src/config.js");
+    const matrix = BUNDLED_COMPATIBILITY_MATRIX;
     const nodeMajor = Number(process.versions.node.split(".")[0]);
     const supported = matrix.node.some((entry) => entry.startsWith(`${nodeMajor}.`));
 
     if (supported) {
-      await expect(enforceCompatibility(workspaceMatrix, "0.14.3")).resolves.toMatchObject({
+      await expect(enforceCompatibility(matrix, "0.14.3")).resolves.toMatchObject({
         severity: "info"
       });
       return;
     }
 
-    await expect(enforceCompatibility(workspaceMatrix, "0.14.3")).rejects.toMatchObject({
+    await expect(enforceCompatibility(matrix, "0.14.3")).rejects.toMatchObject({
       code: "E_COMPAT_VERSION_UNSUPPORTED"
     });
   });
