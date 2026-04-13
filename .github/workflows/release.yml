@@ -79,11 +79,11 @@ jobs:
             ## Install
 
             ```bash
-            npm install opencode-qwen-oauth
+            npm install opencode-qwen-auth-plugin
             # or
-            bun add opencode-qwen-oauth
+            bun add opencode-qwen-auth-plugin
             # or
-            pnpm add opencode-qwen-oauth
+            pnpm add opencode-qwen-auth-plugin
             ```
 
             ## Setup
@@ -92,7 +92,7 @@ jobs:
 
             ```json
             {
-              "plugin": ["opencode-qwen-oauth@latest"]
+              "plugin": ["opencode-qwen-auth-plugin@latest"]
             }
             ```
 

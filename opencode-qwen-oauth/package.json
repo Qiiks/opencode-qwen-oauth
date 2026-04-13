@@ -1,5 +1,5 @@
 {
-  "name": "opencode-qwen-oauth",
+  "name": "opencode-qwen-auth-plugin",
   "version": "0.1.0",
   "description": "OpenCode plugin for Qwen OAuth with robust retry, refresh, multi-account pooling, and compatibility policies",
   "type": "module",

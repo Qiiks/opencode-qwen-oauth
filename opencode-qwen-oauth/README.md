@@ -7,11 +7,11 @@ OpenCode plugin for Qwen OAuth with robust retry, refresh, multi-account pooling
 ### Via NPM (Recommended)
 
 ```bash
-npm install opencode-qwen-oauth
+npm install opencode-qwen-auth-plugin
 # or
-bun add opencode-qwen-oauth
+bun add opencode-qwen-auth-plugin
 # or
-pnpm add opencode-qwen-oauth
+pnpm add opencode-qwen-auth-plugin
 ```
 
 Then add to your OpenCode config (`~/.config/opencode/opencode.json`):
@@ -19,7 +19,7 @@ Then add to your OpenCode config (`~/.config/opencode/opencode.json`):
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-qwen-oauth@latest"]
+  "plugin": ["opencode-qwen-auth-plugin@latest"]
 }
 ```
 
