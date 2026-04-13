@@ -1,0 +1,56 @@
+{
+  "name": "opencode-qwen-oauth",
+  "version": "0.1.0",
+  "description": "OpenCode plugin for Qwen OAuth with robust retry, refresh, multi-account pooling, and compatibility policies",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "check:compat": "node ./scripts/check-compat.mjs",
+    "check:governance": "node ./scripts/check-governance-slo.mjs",
+    "test:e2e": "node ./scripts/e2e-smoke.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "qwen",
+    "oauth",
+    "authentication",
+    "multi-account"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Qiiks/opencode-qwen-oauth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Qiiks/opencode-qwen-oauth/issues"
+  },
+      "homepage": "https://github.com/Qiiks/opencode-qwen-oauth#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.0.0",
+    "typescript": "^5"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "^1.2.27",
+    "@types/node": "^24.6.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

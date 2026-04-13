@@ -1,0 +1,27 @@
+export const ERROR_CODES = {
+  AUTH_MISSING_CREDENTIALS: "E_AUTH_MISSING_CREDENTIALS",
+  AUTH_INVALID_CREDENTIALS: "E_AUTH_INVALID_CREDENTIALS",
+  AUTH_SCOPE_UNSUPPORTED: "E_AUTH_SCOPE_UNSUPPORTED",
+  AUTH_HEADLESS_UNSUPPORTED: "E_AUTH_HEADLESS_UNSUPPORTED",
+  REFRESH_SINGLEFLIGHT_TIMEOUT: "E_REFRESH_SINGLEFLIGHT_TIMEOUT",
+  REFRESH_UPSTREAM_REJECTED: "E_REFRESH_UPSTREAM_REJECTED",
+  STORAGE_BACKEND_UNAVAILABLE: "E_STORAGE_BACKEND_UNAVAILABLE",
+  RETRY_BUDGET_EXHAUSTED: "E_RETRY_BUDGET_EXHAUSTED",
+  RETRY_CLASS_DISALLOWED: "E_RETRY_CLASS_DISALLOWED",
+  BREAKER_OPEN: "E_BREAKER_OPEN",
+  COMPAT_VERSION_UNSUPPORTED: "E_COMPAT_VERSION_UNSUPPORTED"
+} as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
+
+export class PluginError extends Error {
+  readonly code: ErrorCode;
+  readonly details?: Record<string, unknown>;
+
+  constructor(code: ErrorCode, message: string, details?: Record<string, unknown>) {
+    super(message);
+    this.code = code;
+    this.details = details;
+    this.name = "PluginError";
+  }
+}

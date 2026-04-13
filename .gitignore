@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+**/dist/
+out/
+**/out/
+*.tgz
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+*.lcov
+
+# Env files
+.env
+.env*.local
+
+# Cache
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# NPM publish token
+.npmrc
+
+# OMG (oh-my-githubcopilot) artifacts - keep only workflows
+.github/agents/
+.github/hooks/
+.github/prompts/
+.github/skills/
+.github/copilot-instructions.md
+
+# MCP server (separate project)
+mcp-server/
+
+# OpenCode project state
+.omc/
