@@ -679,9 +679,19 @@ async function refreshOAuthToken(auth: StoredAuth & { type: "oauth" }): Promise<
   });
 
   if (!response.ok) {
+    let details = "";
+    try {
+      const raw = await response.text();
+      if (raw.trim()) {
+        details = `: ${raw.slice(0, 300)}`;
+      }
+    } catch {
+      // Keep fallback error text.
+    }
+
     throw new PluginError(
       ERROR_CODES.REFRESH_UPSTREAM_REJECTED,
-      `Qwen OAuth refresh failed: ${response.status} ${response.statusText}`
+      `Qwen OAuth refresh failed: ${response.status} ${response.statusText}${details}`
     );
   }
 
@@ -1041,6 +1051,18 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
   }
 
   async function resolvePluginAuth(getAuth: () => Promise<StoredAuth>): Promise<StoredAuth & { type: "oauth" }> {
+    const now = () => Date.now();
+    const hasUsableAccess = (auth: StoredAuth & { type: "oauth" }): boolean =>
+      Boolean(auth.access && auth.access.trim().length > 0 && auth.expires > now() + 60_000);
+
+    const persistAuthBestEffort = async (auth: StoredAuth & { type: "oauth" }): Promise<void> => {
+      try {
+        await persistTokenRecord(toTokenRecord(auth));
+      } catch {
+        // Best effort only.
+      }
+    };
+
     const getLocalFreshAuthCandidate = async (
       preferredAccountId?: string
     ): Promise<(StoredAuth & { type: "oauth" }) | undefined> => {
@@ -1085,7 +1107,8 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
 
     const currentAuth = authCache ?? live;
 
-    if (currentAuth.expires > Date.now() + 60_000) {
+    if (hasUsableAccess(currentAuth)) {
+      await persistAuthBestEffort(currentAuth);
       return currentAuth;
     }
 
@@ -1113,16 +1136,30 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
       }
       return authCache ?? currentAuth;
     } catch {
+      // Another process may have refreshed and updated OpenCode auth since our first read.
+      try {
+        const latest = await getAuth();
+        if (isOauthAuth(latest) && hasUsableAccess(latest)) {
+          authCache = latest;
+          accountPool.importStoredAuth(latest);
+          await persistAuthBestEffort(latest);
+          return latest;
+        }
+      } catch {
+        // Continue with local fallback check.
+      }
+
       const localFreshAfterFailure = await getLocalFreshAuthCandidate(currentAuth.accountId);
       if (localFreshAfterFailure) {
         authCache = localFreshAfterFailure;
         accountPool.importStoredAuth(localFreshAfterFailure);
+        await persistAuthBestEffort(localFreshAfterFailure);
         return localFreshAfterFailure;
       }
 
       throw new PluginError(
         ERROR_CODES.REFRESH_UPSTREAM_REJECTED,
-        "Qwen OAuth refresh failed and no fresh local token was available"
+        "Qwen OAuth refresh failed and no fresh local token was available. Re-authenticate with `opencode auth login`."
       );
     }
   }

@@ -49,3 +49,10 @@ mcp-server/
 
 # OpenCode project state
 .omc/
+opencode.json
+.gitignore
+.dual-graph/mcp_server.log.err
+.dual-graph/mcp_server.pid
+.gitignore
+.dual-graph/mcp_port
+.dual-graph/
