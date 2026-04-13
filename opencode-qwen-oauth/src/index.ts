@@ -193,7 +193,7 @@ export function getMenuAccountStorePath(): string {
 export async function loadMenuAccountRecords(): Promise<TokenRecord[]> {
   try {
     const native = await loadTokens();
-    if (native.length > 0) {
+    if (Array.isArray(native) && native.length > 0) {
       return native;
     }
   } catch {
@@ -207,7 +207,7 @@ export async function loadMenuAccountRecords(): Promise<TokenRecord[]> {
     if (Array.isArray(parsed)) {
       return parsed;
     }
-    if (Array.isArray(parsed.tokens)) {
+    if (parsed && typeof parsed === "object" && Array.isArray(parsed.tokens)) {
       return parsed.tokens;
     }
     return [];
@@ -217,6 +217,10 @@ export async function loadMenuAccountRecords(): Promise<TokenRecord[]> {
 }
 
 export async function saveMenuAccountRecords(records: TokenRecord[]): Promise<void> {
+  if (!Array.isArray(records)) {
+    return;
+  }
+
   const normalized = records.map((record) => ({
     ...record,
     enabled: record.enabled ?? true,
