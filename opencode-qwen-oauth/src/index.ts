@@ -6,7 +6,7 @@ import { logInfo } from "./logging.js";
 import { incrementCounter } from "./telemetry.js";
 import { AuthManager } from "./auth.js";
 import { RefreshCoordinator } from "./refresh.js";
-import { loadTokens, saveTokens } from "./storage.js";
+import { acquireRefreshLock, loadTokens, saveTokens } from "./storage.js";
 import { AccountPool } from "./account-pool.js";
 import { ModelCache } from "./model-cache.js";
 import { applyQuotaEstimate, detectQuotaSignal, formatQuota, formatQuotaEstimate, formatQuotaSignal, queryQuota } from "./quota.js";
@@ -499,18 +499,34 @@ async function checkAllQuotas(records: TokenRecord[]): Promise<TokenRecord[]> {
 
     if (expiresAt <= Date.now() + 60_000 && refreshToken) {
       try {
-        const refreshed = await refreshOAuthToken({
-          type: "oauth",
-          access: accessToken,
-          refresh: refreshToken,
-          expires: expiresAt,
-          accountId: account.accountId,
-          resourceUrl
-        });
-        accessToken = refreshed.access;
-        expiresAt = refreshed.expires;
-        refreshToken = refreshed.refresh;
-        resourceUrl = refreshed.resourceUrl;
+        const release = await acquireRefreshLock();
+        try {
+          const reReadRecords = await loadMenuAccountRecords();
+          const freshRecord = reReadRecords.find(
+            (r) => r.accountId === account.accountId && r.enabled !== false && r.expiresAt > Date.now() + 60_000
+          );
+          if (freshRecord) {
+            accessToken = freshRecord.accessToken;
+            expiresAt = freshRecord.expiresAt;
+            refreshToken = freshRecord.refreshToken;
+            resourceUrl = freshRecord.resourceUrl;
+          } else {
+            const refreshed = await refreshOAuthToken({
+              type: "oauth",
+              access: accessToken,
+              refresh: refreshToken,
+              expires: expiresAt,
+              accountId: account.accountId,
+              resourceUrl
+            });
+            accessToken = refreshed.access;
+            expiresAt = refreshed.expires;
+            refreshToken = refreshed.refresh;
+            resourceUrl = refreshed.resourceUrl;
+          }
+        } finally {
+          await release();
+        }
         const existing = updated[idx];
         if (existing) {
           updated[idx] = {
@@ -680,13 +696,28 @@ async function refreshOAuthToken(auth: StoredAuth & { type: "oauth" }): Promise<
 
   if (!response.ok) {
     let details = "";
+    let oauthError = "";
     try {
       const raw = await response.text();
       if (raw.trim()) {
         details = `: ${raw.slice(0, 300)}`;
+        try {
+          const parsed = JSON.parse(raw) as { error?: string };
+          oauthError = parsed.error ?? "";
+        } catch {
+          // Not JSON, details already captured.
+        }
       }
     } catch {
       // Keep fallback error text.
+    }
+
+    if (oauthError === "invalid_grant" || oauthError === "invalid_token") {
+      throw new PluginError(
+        ERROR_CODES.REFRESH_UPSTREAM_REJECTED,
+        `Qwen OAuth refresh token was already used or invalidated (concurrent refresh race).${details}`,
+        { oauthError, accountId: auth.accountId }
+      );
     }
 
     throw new PluginError(
@@ -708,6 +739,12 @@ async function refreshOAuthToken(auth: StoredAuth & { type: "oauth" }): Promise<
     accountId: auth.accountId,
     resourceUrl: payload.resource_url ?? auth.resourceUrl
   };
+}
+
+function isInvalidGrantError(error: unknown): boolean {
+  return error instanceof PluginError
+    && error.code === ERROR_CODES.REFRESH_UPSTREAM_REJECTED
+    && Boolean(error.details?.oauthError);
 }
 
 function modelFromId(id: string, baseUrl: string): ProviderModel {
@@ -1120,7 +1157,32 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
     }
 
     if (!refreshInFlight) {
-      refreshInFlight = refreshOAuthToken(currentAuth).finally(() => {
+      refreshInFlight = (async () => {
+        const release = await acquireRefreshLock();
+        try {
+          const reReadCandidate = await getLocalFreshAuthCandidate(currentAuth.accountId);
+          if (reReadCandidate) {
+            return reReadCandidate;
+          }
+
+          const reReadAuth = await getAuth();
+          const candidate = isOauthAuth(reReadAuth) ? reReadAuth : currentAuth;
+
+          try {
+            return await refreshOAuthToken(candidate);
+          } catch (error) {
+            if (isInvalidGrantError(error)) {
+              const afterGrantFailure = await getLocalFreshAuthCandidate(currentAuth.accountId);
+              if (afterGrantFailure) {
+                return afterGrantFailure;
+              }
+            }
+            throw error;
+          }
+        } finally {
+          await release();
+        }
+      })().finally(() => {
         refreshInFlight = undefined;
       });
     }
@@ -1136,7 +1198,6 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
       }
       return authCache ?? currentAuth;
     } catch {
-      // Another process may have refreshed and updated OpenCode auth since our first read.
       try {
         const latest = await getAuth();
         if (isOauthAuth(latest) && hasUsableAccess(latest)) {
@@ -1194,37 +1255,86 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
       };
     }
 
+    const release = await acquireRefreshLock();
     try {
-      const refreshed = await refreshOAuthToken(fromTokenRecord({
-        accountId: selected.accountId,
-        accessToken: selected.accessToken,
-        refreshToken: selected.refreshToken,
-        expiresAt: selected.expiresAt,
-        resourceUrl: selected.resourceUrl
-      }));
-      const refreshedRecord = toTokenRecord(refreshed);
-      accountPool.replace({
-        accountId: refreshedRecord.accountId,
-        accessToken: refreshedRecord.accessToken,
-        refreshToken: refreshedRecord.refreshToken,
-        expiresAt: refreshedRecord.expiresAt,
-        resourceUrl: refreshedRecord.resourceUrl
-      });
-      try {
-        await persistTokenRecord(refreshedRecord);
-      } catch {
-        // Non-fatal for request path.
+      const reReadRecords = await loadMenuAccountRecords();
+      const reReadMatch = reReadRecords.find(
+        (r) => r.accountId === selected.accountId && r.enabled !== false && r.expiresAt > Date.now() + 60_000
+      );
+      if (reReadMatch) {
+        accountPool.replace({
+          accountId: reReadMatch.accountId,
+          accessToken: reReadMatch.accessToken,
+          refreshToken: reReadMatch.refreshToken,
+          expiresAt: reReadMatch.expiresAt,
+          resourceUrl: reReadMatch.resourceUrl
+        });
+        return {
+          accountId: reReadMatch.accountId,
+          accessToken: reReadMatch.accessToken,
+          refreshToken: reReadMatch.refreshToken,
+          expiresAt: reReadMatch.expiresAt,
+          resourceUrl: reReadMatch.resourceUrl
+        };
       }
-      return refreshedRecord;
-    } catch {
-      accountPool.markFailure(selected.accountId, 30_000);
-      return {
-        accountId: selected.accountId,
-        accessToken: selected.accessToken,
-        refreshToken: selected.refreshToken,
-        expiresAt: selected.expiresAt,
-        resourceUrl: selected.resourceUrl
-      };
+
+      try {
+        const refreshed = await refreshOAuthToken(fromTokenRecord({
+          accountId: selected.accountId,
+          accessToken: selected.accessToken,
+          refreshToken: selected.refreshToken,
+          expiresAt: selected.expiresAt,
+          resourceUrl: selected.resourceUrl
+        }));
+        const refreshedRecord = toTokenRecord(refreshed);
+        accountPool.replace({
+          accountId: refreshedRecord.accountId,
+          accessToken: refreshedRecord.accessToken,
+          refreshToken: refreshedRecord.refreshToken,
+          expiresAt: refreshedRecord.expiresAt,
+          resourceUrl: refreshedRecord.resourceUrl
+        });
+        try {
+          await persistTokenRecord(refreshedRecord);
+        } catch {
+          // Non-fatal for request path.
+        }
+        return refreshedRecord;
+      } catch (error) {
+        if (isInvalidGrantError(error)) {
+          const afterGrantFailure = await loadMenuAccountRecords();
+          const freshRecord = afterGrantFailure.find(
+            (r) => r.accountId === selected.accountId && r.enabled !== false && r.expiresAt > Date.now() + 60_000
+          );
+          if (freshRecord) {
+            accountPool.replace({
+              accountId: freshRecord.accountId,
+              accessToken: freshRecord.accessToken,
+              refreshToken: freshRecord.refreshToken,
+              expiresAt: freshRecord.expiresAt,
+              resourceUrl: freshRecord.resourceUrl
+            });
+            return {
+              accountId: freshRecord.accountId,
+              accessToken: freshRecord.accessToken,
+              refreshToken: freshRecord.refreshToken,
+              expiresAt: freshRecord.expiresAt,
+              resourceUrl: freshRecord.resourceUrl
+            };
+          }
+        }
+
+        accountPool.markFailure(selected.accountId, 30_000);
+        return {
+          accountId: selected.accountId,
+          accessToken: selected.accessToken,
+          refreshToken: selected.refreshToken,
+          expiresAt: selected.expiresAt,
+          resourceUrl: selected.resourceUrl
+        };
+      }
+    } finally {
+      await release();
     }
   }
 

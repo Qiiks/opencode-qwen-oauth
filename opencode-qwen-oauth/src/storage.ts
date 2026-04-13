@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rmdir, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir, userInfo } from "node:os";
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
@@ -6,6 +6,60 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { ERROR_CODES, PluginError } from "./errors.js";
 import type { TokenRecord } from "./types.js";
+
+const LOCK_STALE_MS = 30_000;
+const LOCK_POLL_INTERVAL_MS = 200;
+const LOCK_MAX_WAIT_MS = 10_000;
+
+export function getLockDirPath(storagePath = getTokenStoragePath()): string {
+  return `${storagePath}.refresh-lock`;
+}
+
+export async function acquireRefreshLock(storagePath = getTokenStoragePath()): Promise<() => Promise<void>> {
+  const lockDir = getLockDirPath(storagePath);
+  const deadline = Date.now() + LOCK_MAX_WAIT_MS;
+
+  while (Date.now() < deadline) {
+    try {
+      await mkdir(lockDir, { recursive: false });
+      return async () => {
+        try {
+          await rmdir(lockDir);
+        } catch {
+          // Lock already removed (e.g. stale cleanup by another process).
+        }
+      };
+    } catch (error: unknown) {
+      const code = error instanceof Error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+      if (code !== "EEXIST") {
+        throw error;
+      }
+
+      // Check if lock is stale (owner process likely crashed).
+      try {
+        const lockStat = await stat(lockDir);
+        if (Date.now() - lockStat.mtimeMs > LOCK_STALE_MS) {
+          try {
+            await rmdir(lockDir);
+          } catch {
+            // Another process cleaned it up first — retry mkdir.
+          }
+          continue;
+        }
+      } catch {
+        // Lock directory disappeared between mkdir and stat — retry.
+        continue;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, LOCK_POLL_INTERVAL_MS));
+    }
+  }
+
+  throw new PluginError(
+    ERROR_CODES.STORAGE_BACKEND_UNAVAILABLE,
+    `Could not acquire refresh lock within ${LOCK_MAX_WAIT_MS}ms. Another process may be refreshing tokens.`
+  );
+}
 
 interface PersistedState {
   version: number;
