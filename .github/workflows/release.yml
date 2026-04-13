@@ -48,11 +48,12 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           TAG_EXISTS=$(git tag -l "v$VERSION")
-          if [ -z "$TAG_EXISTS" ]; then
+          NPM_EXISTS=$(npm view opencode-qwen-auth-plugin@$VERSION version 2>/dev/null || echo "")
+          if [ -z "$TAG_EXISTS" ] && [ -z "$NPM_EXISTS" ]; then
             echo "version=$VERSION" >> "$GITHUB_OUTPUT"
             echo "publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Version $VERSION already published (tag v$VERSION exists)"
+            echo "Version $VERSION already published (tag=${TAG_EXISTS:-none}, npm=${NPM_EXISTS:-none})"
             echo "publish=false" >> "$GITHUB_OUTPUT"
           fi
 
