@@ -1,4 +1,5 @@
 import type { TokenRecord, StoredAuth } from "./types.js";
+import { canonicalAccountId } from "./account-identity.js";
 
 export interface AccountCandidate {
   accountId: string;
@@ -43,8 +44,14 @@ export class AccountPool {
       return;
     }
 
+    const accountId = this.resolveAccountId(
+      auth.accountId,
+      auth.access,
+      auth.refresh
+    );
+
     this.upsert({
-      accountId: auth.accountId ?? "primary",
+      accountId,
       accessToken: auth.access,
       refreshToken: auth.refresh,
       expiresAt: auth.expires,
@@ -58,8 +65,14 @@ export class AccountPool {
         continue;
       }
 
+      const accountId = this.resolveAccountId(
+        record.accountId,
+        record.accessToken,
+        record.refreshToken
+      );
+
       this.upsert({
-        accountId: record.accountId,
+        accountId,
         accessToken: record.accessToken,
         refreshToken: record.refreshToken,
         expiresAt: record.expiresAt,
@@ -188,5 +201,9 @@ export class AccountPool {
     };
     this.runtimes.set(next.accountId, next);
     return next;
+  }
+
+  private resolveAccountId(accountId: string | undefined, accessToken?: string, refreshToken?: string): string {
+    return canonicalAccountId({ accountId, accessToken, refreshToken });
   }
 }

@@ -2,10 +2,27 @@ import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-const modulePath = resolve(process.cwd(), "dist", "src", "index.js");
+const moduleCandidates = [
+  resolve(process.cwd(), "dist", "index.js"),
+  resolve(process.cwd(), "dist", "src", "index.js")
+];
 const matrixPath = resolve(process.cwd(), "..", ".omc", "contracts", "compatibility-matrix.json");
 
-await stat(modulePath);
+let modulePath;
+for (const candidate of moduleCandidates) {
+  try {
+    await stat(candidate);
+    modulePath = candidate;
+    break;
+  } catch {
+    // try next candidate
+  }
+}
+
+if (!modulePath) {
+  throw new Error(`Missing built plugin module. Checked: ${moduleCandidates.join(", ")}`);
+}
+
 await stat(matrixPath);
 
 const plugin = await import(pathToFileURL(modulePath).href);

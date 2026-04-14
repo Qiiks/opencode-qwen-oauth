@@ -12,6 +12,7 @@ import { ModelCache } from "./model-cache.js";
 import { applyQuotaEstimate, detectQuotaSignal, formatQuota, formatQuotaEstimate, formatQuotaSignal, queryQuota } from "./quota.js";
 import { confirmMenu, isInteractiveTTY, selectMenu } from "./tui.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { canonicalAccountId, canonicalAccountLabel } from "./account-identity.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { dirname, join } from "node:path";
@@ -107,19 +108,73 @@ function toBase64Url(buffer: Buffer): string {
     .replace(/=+$/g, "");
 }
 
-function extractAccountIdFromAccessToken(accessToken: string): string | undefined {
-  const parts = accessToken.split(".");
-  if (parts.length < 2) {
-    return undefined;
+function normalizeStoredAuthAccount(auth: StoredAuth & { type: "oauth" }): StoredAuth & { type: "oauth" } {
+  const accountId = canonicalAccountId({
+    accountId: auth.accountId,
+    accessToken: auth.access,
+    refreshToken: auth.refresh
+  });
+
+  return {
+    ...auth,
+    accountId
+  };
+}
+
+function normalizeTokenRecord(record: TokenRecord): TokenRecord {
+  const accountId = canonicalAccountId({
+    accountId: record.accountId,
+    accessToken: record.accessToken,
+    refreshToken: record.refreshToken
+  });
+
+  return {
+    ...record,
+    accountId,
+    enabled: record.enabled ?? true,
+    createdAt: record.createdAt ?? Date.now(),
+    lastUsedAt: record.lastUsedAt ?? Date.now(),
+    label: canonicalAccountLabel(record.label, accountId)
+  };
+}
+
+function mergeTokenRecords(left: TokenRecord, right: TokenRecord): TokenRecord {
+  const preferred = left.expiresAt >= right.expiresAt ? left : right;
+  const fallback = preferred === left ? right : left;
+
+  const accountId = canonicalAccountId({
+    accountId: preferred.accountId,
+    accessToken: preferred.accessToken,
+    refreshToken: preferred.refreshToken
+  });
+
+  return {
+    ...preferred,
+    accessToken: preferred.accessToken || fallback.accessToken,
+    refreshToken: preferred.refreshToken || fallback.refreshToken,
+    resourceUrl: preferred.resourceUrl || fallback.resourceUrl,
+    accountId,
+    enabled: preferred.enabled ?? true,
+    createdAt: Math.min(left.createdAt ?? Date.now(), right.createdAt ?? Date.now()),
+    lastUsedAt: Math.max(left.lastUsedAt ?? 0, right.lastUsedAt ?? 0),
+    label: canonicalAccountLabel(preferred.label ?? fallback.label, accountId)
+  };
+}
+
+function normalizeTokenRecords(records: TokenRecord[]): TokenRecord[] {
+  const byAccountId = new Map<string, TokenRecord>();
+  for (const record of records) {
+    const normalized = normalizeTokenRecord(record);
+    const existing = byAccountId.get(normalized.accountId);
+    if (!existing) {
+      byAccountId.set(normalized.accountId, normalized);
+      continue;
+    }
+
+    byAccountId.set(normalized.accountId, mergeTokenRecords(existing, normalized));
   }
 
-  try {
-    const payload = JSON.parse(Buffer.from(parts[1] ?? "", "base64url").toString("utf8")) as Record<string, unknown>;
-    const candidate = payload.sub ?? payload.email ?? payload.uid;
-    return typeof candidate === "string" && candidate.trim().length > 0 ? candidate : undefined;
-  } catch {
-    return undefined;
-  }
+  return [...byAccountId.values()];
 }
 
 function formatRelativeAge(timestamp?: number): string {
@@ -191,29 +246,31 @@ export function getMenuAccountStorePath(): string {
 }
 
 export async function loadMenuAccountRecords(): Promise<TokenRecord[]> {
+  let nativeRecords: TokenRecord[] = [];
   try {
     const native = await loadTokens();
-    if (Array.isArray(native) && native.length > 0) {
-      return native;
+    if (Array.isArray(native)) {
+      nativeRecords = native;
     }
   } catch {
     // fallback to menu-local store
   }
 
+  let localRecords: TokenRecord[] = [];
   try {
     const path = getMenuAccountStorePath();
     const raw = await readFile(path, "utf8");
     const parsed = JSON.parse(raw) as { version?: number; tokens?: TokenRecord[] } | TokenRecord[];
     if (Array.isArray(parsed)) {
-      return parsed;
+      localRecords = parsed;
+    } else if (parsed && typeof parsed === "object" && Array.isArray(parsed.tokens)) {
+      localRecords = parsed.tokens;
     }
-    if (parsed && typeof parsed === "object" && Array.isArray(parsed.tokens)) {
-      return parsed.tokens;
-    }
-    return [];
   } catch {
-    return [];
+    // local fallback missing/unreadable
   }
+
+  return normalizeTokenRecords([...nativeRecords, ...localRecords]);
 }
 
 export async function saveMenuAccountRecords(records: TokenRecord[]): Promise<void> {
@@ -221,13 +278,7 @@ export async function saveMenuAccountRecords(records: TokenRecord[]): Promise<vo
     return;
   }
 
-  const normalized = records.map((record) => ({
-    ...record,
-    enabled: record.enabled ?? true,
-    createdAt: record.createdAt ?? Date.now(),
-    lastUsedAt: record.lastUsedAt ?? Date.now(),
-    label: record.label ?? record.accountId
-  }));
+  const normalized = normalizeTokenRecords(records);
 
   let nativeSaved = false;
   try {
@@ -999,8 +1050,13 @@ function parseRetryAfterMs(response: Response): number | undefined {
 }
 
 function toTokenRecord(auth: StoredAuth & { type: "oauth" }): TokenRecord {
+  const accountId = canonicalAccountId({
+    accountId: auth.accountId,
+    accessToken: auth.access,
+    refreshToken: auth.refresh
+  });
   return {
-    accountId: auth.accountId ?? "primary",
+    accountId,
     accessToken: auth.access,
     refreshToken: auth.refresh,
     expiresAt: auth.expires,
@@ -1008,7 +1064,7 @@ function toTokenRecord(auth: StoredAuth & { type: "oauth" }): TokenRecord {
     enabled: true,
     createdAt: Date.now(),
     lastUsedAt: Date.now(),
-    label: auth.accountId ?? "primary"
+    label: canonicalAccountLabel(auth.accountId, accountId)
   };
 }
 
@@ -1080,6 +1136,23 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
     await saveMenuAccountRecords(updated);
   }
 
+  async function disableAccountRecord(accountId: string): Promise<void> {
+    const existing = await loadMenuAccountRecords();
+    const updated = existing.map((item) => {
+      if (item.accountId !== accountId) {
+        return item;
+      }
+
+      return {
+        ...item,
+        enabled: false,
+        lastUsedAt: Date.now()
+      };
+    });
+
+    await saveMenuAccountRecords(updated);
+  }
+
   async function hydratePoolFromLocalStore(): Promise<void> {
     if (!localPoolHydration) {
       localPoolHydration = (async () => {
@@ -1126,12 +1199,18 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
         return undefined;
       }
 
+      const canonical = canonicalAccountId({
+        accountId: candidate.accountId,
+        accessToken: candidate.accessToken,
+        refreshToken: candidate.refreshToken
+      });
+
       return {
         type: "oauth",
         access: candidate.accessToken,
         refresh: candidate.refreshToken ?? candidate.accessToken,
         expires: candidate.expiresAt,
-        accountId: candidate.accountId,
+        accountId: canonical,
         resourceUrl: candidate.resourceUrl
       };
     };
@@ -1141,12 +1220,19 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
       throw new PluginError(ERROR_CODES.AUTH_INVALID_CREDENTIALS, "QwenCode provider requires OAuth credentials");
     }
 
-    if (!authCache || authCache.access !== live.access || authCache.refresh !== live.refresh) {
-      authCache = live;
-      accountPool.importStoredAuth(live);
+    const normalizedLive = normalizeStoredAuthAccount(live);
+
+    if (
+      !authCache
+      || authCache.access !== normalizedLive.access
+      || authCache.refresh !== normalizedLive.refresh
+      || authCache.accountId !== normalizedLive.accountId
+    ) {
+      authCache = normalizedLive;
+      accountPool.importStoredAuth(normalizedLive);
     }
 
-    const currentAuth = authCache ?? live;
+    const currentAuth = authCache ?? normalizedLive;
 
     if (hasUsableAccess(currentAuth)) {
       await persistAuthBestEffort(currentAuth);
@@ -1170,10 +1256,10 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
           }
 
           const reReadAuth = await getAuth();
-          const candidate = isOauthAuth(reReadAuth) ? reReadAuth : currentAuth;
+          const candidate = isOauthAuth(reReadAuth) ? normalizeStoredAuthAccount(reReadAuth) : currentAuth;
 
           try {
-            return await refreshOAuthToken(candidate);
+            return normalizeStoredAuthAccount(await refreshOAuthToken(candidate));
           } catch (error) {
             if (isInvalidGrantError(error)) {
               const afterGrantFailure = await getLocalFreshAuthCandidate(currentAuth.accountId);
@@ -1192,7 +1278,7 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
     }
 
     try {
-      const refreshed = await refreshInFlight;
+      const refreshed = normalizeStoredAuthAccount(await refreshInFlight);
       authCache = refreshed;
       accountPool.importStoredAuth(refreshed);
       try {
@@ -1204,11 +1290,14 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
     } catch {
       try {
         const latest = await getAuth();
-        if (isOauthAuth(latest) && hasUsableAccess(latest)) {
-          authCache = latest;
-          accountPool.importStoredAuth(latest);
-          await persistAuthBestEffort(latest);
-          return latest;
+        if (isOauthAuth(latest)) {
+          const normalizedLatest = normalizeStoredAuthAccount(latest);
+          if (hasUsableAccess(normalizedLatest)) {
+            authCache = normalizedLatest;
+            accountPool.importStoredAuth(normalizedLatest);
+            await persistAuthBestEffort(normalizedLatest);
+            return normalizedLatest;
+          }
         }
       } catch {
         // Continue with local fallback check.
@@ -1234,7 +1323,7 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
     const live = await resolvePluginAuth(getAuth);
     accountPool.importStoredAuth(live);
 
-    const selected = accountPool.select(live.accountId ?? "primary") ?? accountPool.select();
+    const selected = accountPool.select(live.accountId) ?? accountPool.select();
     if (!selected) {
       return toTokenRecord(live);
     }
@@ -1326,6 +1415,39 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
               resourceUrl: freshRecord.resourceUrl
             };
           }
+
+          try {
+            await disableAccountRecord(selected.accountId);
+          } catch {
+            // Best effort only.
+          }
+
+          throw new PluginError(
+            ERROR_CODES.REFRESH_UPSTREAM_REJECTED,
+            "Qwen OAuth refresh token is no longer valid for this account. Re-authenticate with `opencode auth login`.",
+            { accountId: selected.accountId }
+          );
+        }
+
+        const fallbackRecords = await loadMenuAccountRecords();
+        const fallbackFresh = fallbackRecords.find(
+          (r) => r.accountId === selected.accountId && r.enabled !== false && r.expiresAt > Date.now() + 60_000
+        );
+        if (fallbackFresh) {
+          accountPool.replace({
+            accountId: fallbackFresh.accountId,
+            accessToken: fallbackFresh.accessToken,
+            refreshToken: fallbackFresh.refreshToken,
+            expiresAt: fallbackFresh.expiresAt,
+            resourceUrl: fallbackFresh.resourceUrl
+          });
+          return {
+            accountId: fallbackFresh.accountId,
+            accessToken: fallbackFresh.accessToken,
+            refreshToken: fallbackFresh.refreshToken,
+            expiresAt: fallbackFresh.expiresAt,
+            resourceUrl: fallbackFresh.resourceUrl
+          };
         }
 
         accountPool.markFailure(selected.accountId, 30_000);
@@ -1552,9 +1674,13 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
               callback: async () => {
                 const result = await pollDeviceToken(device.device_code, codeVerifier, device.expires_in);
                 if (result.type === "success") {
-                  const derivedAccountId = result.accountId ?? extractAccountIdFromAccessToken(result.access);
+                  const accountId = canonicalAccountId({
+                    accountId: result.accountId,
+                    accessToken: result.access,
+                    refreshToken: result.refresh
+                  });
                   const record: TokenRecord = {
-                    accountId: derivedAccountId ?? randomUUID(),
+                    accountId,
                     accessToken: result.access,
                     refreshToken: result.refresh,
                     expiresAt: result.expires,
@@ -1562,7 +1688,7 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
                     enabled: true,
                     createdAt: Date.now(),
                     lastUsedAt: Date.now(),
-                    label: derivedAccountId ?? result.accountId ?? "qwen-account"
+                    label: canonicalAccountLabel(result.accountId, accountId)
                   };
                   accountPool.importTokenRecords([record]);
                   try {
@@ -1590,11 +1716,12 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
             : defaultQwenModels(QWEN_DEFAULT_BASE_URL);
         }
 
-        accountPool.importStoredAuth(oauth);
-        const selected = accountPool.select(oauth.accountId ?? "primary") ?? accountPool.select();
+        const normalizedOauth = normalizeStoredAuthAccount(oauth);
+        accountPool.importStoredAuth(normalizedOauth);
+        const selected = accountPool.select(normalizedOauth.accountId) ?? accountPool.select();
         const accessToken = selected?.accessToken ?? oauth.access;
-        const baseUrl = normalizeBaseUrl(selected?.resourceUrl ?? oauth.resourceUrl);
-        const cacheKey = `${selected?.accountId ?? oauth.accountId ?? "primary"}:${baseUrl}`;
+        const baseUrl = normalizeBaseUrl(selected?.resourceUrl ?? normalizedOauth.resourceUrl);
+        const cacheKey = `${selected?.accountId ?? normalizedOauth.accountId}:${baseUrl}`;
         const cached = modelCache.getFresh(cacheKey);
         if (cached) {
           return cached;

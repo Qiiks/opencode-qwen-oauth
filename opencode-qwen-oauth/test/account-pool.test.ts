@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { AccountPool } from "../src/account-pool.js";
 
+function createJwt(payload: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.`;
+}
+
 describe("account pool", () => {
   it("selects both accounts fairly", () => {
     let now = 1_000;
@@ -74,5 +80,39 @@ describe("account pool", () => {
     now += 60_000;
     const regenerated = pool.select();
     expect(regenerated).toBeDefined();
+  });
+
+  it("normalizes legacy primary account id to token-derived subject", () => {
+    const pool = new AccountPool({ now: () => 1000 });
+    const accessToken = createJwt({ sub: "qwencode" });
+
+    pool.importStoredAuth({
+      type: "oauth",
+      access: accessToken,
+      refresh: "refresh-1",
+      expires: 999_999,
+      accountId: "primary"
+    });
+
+    const selected = pool.select();
+    expect(selected?.accountId).toBe("qwencode");
+  });
+
+  it("normalizes primary account id in imported token records", () => {
+    const pool = new AccountPool({ now: () => 1000 });
+    const accessToken = createJwt({ sub: "canonical-subject" });
+
+    pool.importTokenRecords([
+      {
+        accountId: "primary",
+        accessToken,
+        refreshToken: "refresh-primary",
+        expiresAt: 999_999,
+        enabled: true
+      }
+    ]);
+
+    const selected = pool.select();
+    expect(selected?.accountId).toBe("canonical-subject");
   });
 });
