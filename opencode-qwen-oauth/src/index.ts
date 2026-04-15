@@ -12,7 +12,7 @@ import { ModelCache } from "./model-cache.js";
 import { applyQuotaEstimate, detectQuotaSignal, formatQuota, formatQuotaEstimate, formatQuotaSignal, queryQuota } from "./quota.js";
 import { confirmMenu, isInteractiveTTY, selectMenu } from "./tui.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { canonicalAccountId, canonicalAccountLabel } from "./account-identity.js";
+import { canonicalAccountId, canonicalAccountLabel, createRefreshTokenFingerprint } from "./account-identity.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
 import { dirname, join } from "node:path";
@@ -163,11 +163,28 @@ function mergeTokenRecords(left: TokenRecord, right: TokenRecord): TokenRecord {
 
 function normalizeTokenRecords(records: TokenRecord[]): TokenRecord[] {
   const byAccountId = new Map<string, TokenRecord>();
+  const byFingerprint = new Map<string, string>();
+
   for (const record of records) {
     const normalized = normalizeTokenRecord(record);
+
+    const fingerprint = createRefreshTokenFingerprint(normalized.refreshToken);
+    const existingFingerprintAccountId = fingerprint ? byFingerprint.get(fingerprint) : undefined;
+
+    if (existingFingerprintAccountId && existingFingerprintAccountId !== normalized.accountId) {
+      const existing = byAccountId.get(existingFingerprintAccountId);
+      if (existing) {
+        byAccountId.set(existingFingerprintAccountId, mergeTokenRecords(existing, normalized));
+        continue;
+      }
+    }
+
     const existing = byAccountId.get(normalized.accountId);
     if (!existing) {
       byAccountId.set(normalized.accountId, normalized);
+      if (fingerprint) {
+        byFingerprint.set(fingerprint, normalized.accountId);
+      }
       continue;
     }
 
@@ -1102,7 +1119,16 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
 
   async function persistTokenRecord(record: TokenRecord): Promise<void> {
     const existing = await loadMenuAccountRecords();
-    const deduped = existing.filter((item) => item.accountId !== record.accountId);
+    const recordFingerprint = createRefreshTokenFingerprint(record.refreshToken);
+    const deduped = existing.filter((item) => {
+      if (item.accountId === record.accountId) {
+        return false;
+      }
+      if (recordFingerprint && createRefreshTokenFingerprint(item.refreshToken) === recordFingerprint) {
+        return false;
+      }
+      return true;
+    });
     deduped.push({
       ...record,
       enabled: record.enabled ?? true,
@@ -1178,7 +1204,8 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
     };
 
     const getLocalFreshAuthCandidate = async (
-      preferredAccountId?: string
+      preferredAccountId?: string,
+      preferredRefreshToken?: string
     ): Promise<(StoredAuth & { type: "oauth" }) | undefined> => {
       const records = await loadMenuAccountRecords();
       const enabled = records.filter((record) => record.enabled !== false);
@@ -1189,6 +1216,15 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
         candidate = enabled.find(
           (record) => record.accountId === preferredAccountId && record.expiresAt > now + 60_000
         );
+      }
+
+      if (!candidate && preferredRefreshToken) {
+        const fingerprint = createRefreshTokenFingerprint(preferredRefreshToken);
+        if (fingerprint) {
+          candidate = enabled.find(
+            (record) => createRefreshTokenFingerprint(record.refreshToken) === fingerprint && record.expiresAt > now + 60_000
+          );
+        }
       }
 
       if (!candidate) {
@@ -1239,7 +1275,7 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
       return currentAuth;
     }
 
-    const localFreshBeforeRefresh = await getLocalFreshAuthCandidate(currentAuth.accountId);
+    const localFreshBeforeRefresh = await getLocalFreshAuthCandidate(currentAuth.accountId, currentAuth.refresh);
     if (localFreshBeforeRefresh) {
       authCache = localFreshBeforeRefresh;
       accountPool.importStoredAuth(localFreshBeforeRefresh);
@@ -1250,7 +1286,7 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
       refreshInFlight = (async () => {
         const release = await acquireRefreshLock();
         try {
-          const reReadCandidate = await getLocalFreshAuthCandidate(currentAuth.accountId);
+          const reReadCandidate = await getLocalFreshAuthCandidate(currentAuth.accountId, currentAuth.refresh);
           if (reReadCandidate) {
             return reReadCandidate;
           }
@@ -1262,7 +1298,7 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
             return normalizeStoredAuthAccount(await refreshOAuthToken(candidate));
           } catch (error) {
             if (isInvalidGrantError(error)) {
-              const afterGrantFailure = await getLocalFreshAuthCandidate(currentAuth.accountId);
+              const afterGrantFailure = await getLocalFreshAuthCandidate(currentAuth.accountId, currentAuth.refresh);
               if (afterGrantFailure) {
                 return afterGrantFailure;
               }
@@ -1303,7 +1339,7 @@ export const QwenOauthPlugin: PluginFactory = async (ctx) => {
         // Continue with local fallback check.
       }
 
-      const localFreshAfterFailure = await getLocalFreshAuthCandidate(currentAuth.accountId);
+      const localFreshAfterFailure = await getLocalFreshAuthCandidate(currentAuth.accountId, currentAuth.refresh);
       if (localFreshAfterFailure) {
         authCache = localFreshAfterFailure;
         accountPool.importStoredAuth(localFreshAfterFailure);

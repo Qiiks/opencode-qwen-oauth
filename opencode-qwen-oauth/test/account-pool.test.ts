@@ -82,7 +82,7 @@ describe("account pool", () => {
     expect(regenerated).toBeDefined();
   });
 
-  it("normalizes legacy primary account id to token-derived subject", () => {
+  it("normalizes legacy primary account id to refreshToken-based fingerprint", () => {
     const pool = new AccountPool({ now: () => 1000 });
     const accessToken = createJwt({ sub: "qwencode" });
 
@@ -95,10 +95,10 @@ describe("account pool", () => {
     });
 
     const selected = pool.select();
-    expect(selected?.accountId).toBe("qwencode");
+    expect(selected?.accountId).toMatch(/^acct-[0-9a-f]{12}$/);
   });
 
-  it("normalizes primary account id in imported token records", () => {
+  it("normalizes primary account id in imported token records using refreshToken", () => {
     const pool = new AccountPool({ now: () => 1000 });
     const accessToken = createJwt({ sub: "canonical-subject" });
 
@@ -113,6 +113,6 @@ describe("account pool", () => {
     ]);
 
     const selected = pool.select();
-    expect(selected?.accountId).toBe("canonical-subject");
+    expect(selected?.accountId).toMatch(/^acct-[0-9a-f]{12}$/);
   });
 });

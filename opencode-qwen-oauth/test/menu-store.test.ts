@@ -60,7 +60,7 @@ describe("menu account store fallback", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("deduplicates legacy primary and canonical account ids", async () => {
+  it("deduplicates accounts with the same refreshToken fingerprint", async () => {
     const dir = await mkdtemp(join(tmpdir(), "qwen-menu-store-dedupe-"));
     process.env.OPENCODE_CONFIG_DIR = dir;
 
@@ -69,12 +69,13 @@ describe("menu account store fallback", () => {
 
     const now = Date.now();
     const jwt = createJwt({ sub: "qwencode" });
+    const sharedRefresh = "shared-refresh-token";
 
     await saveMenuAccountRecords([
       {
         accountId: "primary",
         accessToken: jwt,
-        refreshToken: "refresh-primary",
+        refreshToken: sharedRefresh,
         expiresAt: now + 120_000,
         enabled: true,
         createdAt: now,
@@ -84,7 +85,7 @@ describe("menu account store fallback", () => {
       {
         accountId: "qwencode",
         accessToken: jwt,
-        refreshToken: "refresh-canonical",
+        refreshToken: sharedRefresh,
         expiresAt: now + 180_000,
         enabled: true,
         createdAt: now,
@@ -95,8 +96,7 @@ describe("menu account store fallback", () => {
 
     const loaded = await loadMenuAccountRecords();
     expect(loaded).toHaveLength(1);
-    expect(loaded[0]?.accountId).toBe("qwencode");
-    expect(loaded[0]?.label).toBe("qwencode");
+    expect(loaded[0]?.refreshToken).toBe(sharedRefresh);
 
     await rm(dir, { recursive: true, force: true });
   });
